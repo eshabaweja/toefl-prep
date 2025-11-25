@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
 import { apiClient } from '../services/apiClient'
-import { useAuth } from '../context/AuthContext'
 
 const defaultQuizConfig = {
   level: 'intermediate',
@@ -29,8 +28,10 @@ const getQuestionId = (question, fallbackIndex) => question?.id ?? question?.que
 const getOptions = (question) =>
   question?.choices || question?.answers || question?.options || question?.choicesList || []
 
+const demoToken = import.meta.env.VITE_DEMO_TOKEN || null
+
 const QuizPage = () => {
-  const { token } = useAuth()
+  const token = demoToken
   const [config, setConfig] = useState(defaultQuizConfig)
   const [session, setSession] = useState(null)
   const [questions, setQuestions] = useState([])

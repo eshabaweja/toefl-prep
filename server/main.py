@@ -1,14 +1,13 @@
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime
 import json
 import uuid
 import os
 import asyncio
 from openai import AsyncOpenAI
-import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,6 +16,13 @@ class QuizStartRequest(BaseModel):
     user_id: str = Field(..., description="Unique user identifier")
     level: str = Field(..., description="Quiz difficulty level", 
                        pattern="^(beginner|intermediate|advanced)$")
+    question_count: int = Field(
+        default=10,
+        ge=5,
+        le=20,
+        description="Number of questions to generate for the quiz"
+    )
+    focus: Optional[str] = Field(default="Vocabulary", description="Quiz focus area")
 
 class Question(BaseModel):
     question_number: int
@@ -32,7 +38,12 @@ class QuizStartResponse(BaseModel):
 class QuizSubmitRequest(BaseModel):
     session_id: str
     user_id: str
-    answers: List[str] = Field(..., min_items=10, max_items=10)
+    answers: List[str] = Field(
+        ...,
+        min_items=1,
+        max_items=50,
+        description="Answers in the exact order of the quiz questions"
+    )
 
 class QuestionResult(BaseModel):
     question_number: int
@@ -82,18 +93,32 @@ else:
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-quiz_sessions: dict[str, dict] = {}
-quiz_results: dict[str, dict] = {}
-user_stats: dict[str, dict] = {}
+quiz_sessions: Dict[str, Dict] = {}
+quiz_results: Dict[str, Dict] = {}
+user_stats: Dict[str, Dict] = {}
 
-async def generate_quiz_questions(level: str) -> List[dict]:
+MAX_RECENT_HISTORY = 10
+
+def _ensure_user_record(user_id: str) -> Dict:
+    if user_id not in user_stats:
+        user_stats[user_id] = {
+            "current_level": "beginner",
+            "total_quizzes": 0,
+            "avg_score": 0.0,
+            "total_score": 0.0,
+            "recent_history": [],
+            "latest_quiz": None,
+        }
+    return user_stats[user_id]
+
+async def generate_quiz_questions(level: str, question_count: int) -> List[dict]:
     if not openai_client:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Question generation service unavailable - API key not configured"
         )
     
-    prompt = f"""Generate 10 TOEFL vocabulary multiple-choice questions at {level} level. 
+    prompt = f"""Generate {question_count} TOEFL vocabulary multiple-choice questions at {level} level. 
 Each question should test vocabulary in context. 
 Return ONLY a JSON array with this exact structure, no additional text:
 [{{"question": "...", "options": ["A", "B", "C", "D"], "correct_answer": "A"}}]
@@ -132,8 +157,8 @@ Make sure:
         
         questions = json.loads(content)
         
-        if len(questions) != 10:
-            raise ValueError(f"Expected 10 questions, got {len(questions)}")
+        if len(questions) != question_count:
+            raise ValueError(f"Expected {question_count} questions, got {len(questions)}")
         
         return questions
         
@@ -157,14 +182,17 @@ Make sure:
         )
 
 def save_quiz_session(user_id: str, session_id: str, level: str, 
-                      questions_json: str) -> str:
+                      questions_json: str, question_count: int, focus: Optional[str]) -> str:
     quiz_sessions[session_id] = {
         "user_id": user_id,
         "session_id": session_id,
         "level": level,
+        "focus": focus,
+        "question_count": question_count,
         "questions_json": questions_json,
         "created_at": datetime.utcnow().isoformat()
     }
+    _ensure_user_record(user_id)
     print(f"Saving quiz session: {session_id} for user: {user_id}")
     return session_id
 
@@ -174,18 +202,70 @@ def get_quiz_session(session_id: str) -> Optional[dict]:
 
 def save_quiz_result(user_id: str, session_id: str, score: float, 
                      total: int, answers: List[str]) -> None:
+    submitted_at = datetime.utcnow().isoformat()
+    session_data = quiz_sessions.get(session_id, {})
+    quiz_results[session_id] = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "score": round(score, 2),
+        "total_questions": total,
+        "answers": answers,
+        "level": session_data.get("level"),
+        "focus": session_data.get("focus"),
+        "submitted_at": submitted_at
+    }
     print(f"Saving result for session: {session_id}, score: {score}")
+    update_user_progress(
+        user_id=user_id,
+        new_score=score,
+        session_data=session_data,
+        submitted_at=submitted_at,
+        total_questions=total,
+        session_id=session_id
+    )
 
 def get_user_stats(user_id: str) -> Optional[dict]:
     print(f"Getting stats for user: {user_id}")
-    return None
+    return user_stats.get(user_id)
 
 def get_quiz_history(user_id: str, limit: int = 5) -> List[dict]:
     print(f"Getting history for user: {user_id}")
-    return []
+    record = user_stats.get(user_id)
+    if not record:
+        return []
+    return record.get("recent_history", [])[:limit]
 
-def update_user_progress(user_id: str, new_score: float) -> None:
-    print(f"Updating progress for user: {user_id}, score: {new_score}")
+def update_user_progress(user_id: str, new_score: float, 
+                         session_data: Optional[dict] = None,
+                         submitted_at: Optional[str] = None,
+                         total_questions: Optional[int] = None,
+                         session_id: Optional[str] = None) -> dict:
+    record = _ensure_user_record(user_id)
+    record["total_quizzes"] += 1
+    record["total_score"] += new_score
+    record["avg_score"] = record["total_score"] / record["total_quizzes"]
+    level = session_data.get("level") if session_data else record["current_level"]
+    if level:
+        record["current_level"] = level
+    timestamp = submitted_at or datetime.utcnow().isoformat()
+    latest_quiz = {
+        "session_id": session_id or (session_data.get("session_id") if session_data else None),
+        "score": round(new_score, 2),
+        "total": total_questions or (session_data.get("question_count") if session_data else None),
+        "level": level or "beginner",
+        "focus": (session_data.get("focus") if session_data else None) or "Vocabulary",
+        "submitted_at": timestamp
+    }
+    record["latest_quiz"] = latest_quiz
+    history_entry = {
+        "session_id": latest_quiz["session_id"],
+        "date": timestamp,
+        "level": latest_quiz["level"],
+        "score": latest_quiz["score"],
+    }
+    record["recent_history"].insert(0, history_entry)
+    record["recent_history"] = record["recent_history"][:MAX_RECENT_HISTORY]
+    return record
 
 
 @app.post("/api/quiz/start", response_model=QuizStartResponse, 
@@ -193,13 +273,15 @@ def update_user_progress(user_id: str, new_score: float) -> None:
 async def start_quiz(request: QuizStartRequest):
     try:
         session_id = str(uuid.uuid4())
-        questions_data = await generate_quiz_questions(request.level)
+        questions_data = await generate_quiz_questions(request.level, request.question_count)
         questions_json = json.dumps(questions_data)
         save_quiz_session(
             user_id=request.user_id,
             session_id=session_id,
             level=request.level,
-            questions_json=questions_json
+            questions_json=questions_json,
+            question_count=request.question_count,
+            focus=request.focus
         )
         
         questions_for_response = [
@@ -214,7 +296,7 @@ async def start_quiz(request: QuizStartRequest):
         return QuizStartResponse(
             session_id=session_id,
             level=request.level,
-            total_questions=10,
+            total_questions=len(questions_data),
             questions=questions_for_response
         )
         
@@ -252,7 +334,7 @@ async def get_quiz_questions(session_id: str):
         return QuizStartResponse(
             session_id=session_id,
             level=session_data["level"],
-            total_questions=len(questions_data),
+            total_questions=session_data.get("question_count", len(questions_data)),
             questions=questions_for_response
         )
         
@@ -284,6 +366,11 @@ async def submit_quiz(request: QuizSubmitRequest):
             )
         
         questions_data = json.loads(session_data["questions_json"])
+        if len(request.answers) != len(questions_data):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Number of answers does not match quiz questions"
+            )
         results = []
         correct_count = 0
         
@@ -310,8 +397,6 @@ async def submit_quiz(request: QuizSubmitRequest):
             total=total_questions,
             answers=request.answers
         )
-        
-        update_user_progress(request.user_id, score)
         
         return QuizSubmitResponse(
             session_id=request.session_id,

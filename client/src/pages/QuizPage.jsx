@@ -3,7 +3,7 @@ import { apiClient } from '../services/apiClient'
 
 const defaultQuizConfig = {
   level: 'intermediate',
-  questionCount: 5,
+  questionCount: 10,
   focus: 'Vocabulary',
 }
 
@@ -23,15 +23,17 @@ const normalizeQuestions = (payload) => {
   return []
 }
 
-const getQuestionId = (question, fallbackIndex) => question?.id ?? question?.questionId ?? `q-${fallbackIndex}`
+const getQuestionId = (question, fallbackIndex) =>
+  question?.question_number
+    ? `question-${question.question_number}`
+    : question?.id ?? question?.questionId ?? `q-${fallbackIndex}`
 
 const getOptions = (question) =>
   question?.choices || question?.answers || question?.options || question?.choicesList || []
 
-const demoToken = import.meta.env.VITE_DEMO_TOKEN || null
+const demoUserId = import.meta.env.VITE_DEMO_USER_ID || 'demo-user'
 
 const QuizPage = () => {
-  const token = demoToken
   const [config, setConfig] = useState(defaultQuizConfig)
   const [session, setSession] = useState(null)
   const [questions, setQuestions] = useState([])
@@ -50,19 +52,20 @@ const QuizPage = () => {
     setSubmission(null)
 
     try {
-      const response = await apiClient.startQuiz(token, {
+      const response = await apiClient.startQuiz({
+        user_id: demoUserId,
         level: config.level,
-        questionCount: Number(config.questionCount),
+        question_count: Number(config.questionCount),
         focus: config.focus,
       })
 
-      const sessionId = response?.sessionId ?? response?.id
-      setSession({ ...response, sessionId })
+      const sessionId = response?.session_id ?? response?.sessionId ?? response?.id
+      setSession({ ...response, sessionId, focus: config.focus })
 
       const questionsPayload =
         response?.questions?.length > 0
           ? response
-          : await apiClient.fetchQuizQuestions(token, { sessionId })
+          : await apiClient.fetchQuizQuestions(sessionId)
 
       const nextQuestions = normalizeQuestions(questionsPayload)
       setQuestions(nextQuestions)
@@ -102,13 +105,14 @@ const QuizPage = () => {
     setStatus({ loading: true, error: null })
 
     try {
-      const formattedAnswers = Object.entries(answers).map(([questionId, answer]) => ({
-        questionId,
-        answer,
-      }))
+      const formattedAnswers = questions.map((question, index) => {
+        const questionId = getQuestionId(question, index)
+        return answers[questionId] ?? ''
+      })
 
-      const response = await apiClient.submitQuiz(token, {
-        sessionId: session.sessionId,
+      const response = await apiClient.submitQuiz({
+        session_id: session.sessionId || session.session_id,
+        user_id: demoUserId,
         answers: formattedAnswers,
       })
 
@@ -136,7 +140,7 @@ const QuizPage = () => {
         <label>
           <span>Difficulty level</span>
           <select name="level" value={config.level} onChange={handleConfigChange}>
-            <option value="foundation">Foundation</option>
+            <option value="beginner">Beginner</option>
             <option value="intermediate">Intermediate</option>
             <option value="advanced">Advanced</option>
           </select>
@@ -144,11 +148,7 @@ const QuizPage = () => {
 
         <label>
           <span>Number of questions</span>
-          <select
-            name="questionCount"
-            value={config.questionCount}
-            onChange={handleConfigChange}
-          >
+          <select name="questionCount" value={config.questionCount} onChange={handleConfigChange}>
             <option value={5}>5</option>
             <option value={10}>10</option>
             <option value={15}>15</option>
@@ -180,7 +180,7 @@ const QuizPage = () => {
               <h2>{session.level ? `${session.level} level` : 'Custom session'}</h2>
               <p>
                 Session ID:{' '}
-                <code>{session.sessionId || session.id || 'not provided by API'}</code>
+                <code>{session.sessionId || session.session_id || session.id || 'not provided'}</code>
               </p>
             </div>
             <div className="quiz-progress">
@@ -207,15 +207,15 @@ const QuizPage = () => {
                   <div className="choices">
                     {options.map((choice) => {
                       const choiceLabel = choice?.label ?? choice?.text ?? choice
-                      const choiceValue = choice?.value ?? choice?.id ?? choice
+                      const choiceValue = String(choice?.value ?? choice?.id ?? choice)
                       return (
                         <label key={choiceValue}>
                           <input
                             type="radio"
                             name={questionId}
                             value={choiceValue}
-                            checked={answers[questionId] === String(choiceValue)}
-                            onChange={() => handleAnswerChange(questionId, String(choiceValue))}
+                            checked={answers[questionId] === choiceValue}
+                            onChange={() => handleAnswerChange(questionId, choiceValue)}
                           />
                           <span>{choiceLabel}</span>
                         </label>
@@ -245,18 +245,21 @@ const QuizPage = () => {
             <article>
               <p className="eyebrow">Score</p>
               <p className="stat-value">
-                {submission.score ?? '—'} <span>/ {submission.total ?? questions.length}</span>
+                {submission.score ?? '—'}{' '}
+                <span>/ {submission.total_questions ?? (questions.length || '—')}</span>
               </p>
             </article>
             <article>
               <p className="eyebrow">Accuracy</p>
               <p className="stat-value">
-                {submission.accuracy ? `${submission.accuracy}%` : '—'}
+                {submission.correct_count && submission.total_questions
+                  ? `${Math.round((submission.correct_count / submission.total_questions) * 100)}%`
+                  : '—'}
               </p>
             </article>
             <article>
               <p className="eyebrow">Top skill</p>
-              <p className="stat-value">{submission.topSkill ?? 'Vocabulary'}</p>
+              <p className="stat-value">{session?.focus ?? 'Vocabulary'}</p>
             </article>
           </div>
 

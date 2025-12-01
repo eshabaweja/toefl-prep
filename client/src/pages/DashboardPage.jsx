@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { apiClient } from '../services/apiClient'
 import { useAuth } from '../context/AuthContext'
 
+const fallbackUserId = import.meta.env.VITE_DEMO_USER_ID || 'demo-user'
+
 const normalizeLessons = (lessonPlan) => {
   if (!lessonPlan) {
     return []
@@ -34,16 +36,13 @@ const DashboardPage = () => {
   const [error, setError] = useState(null)
 
   const fetchAllData = useCallback(async () => {
-    if (!token) {
-      return
-    }
-
     setLoading(true)
     setError(null)
 
     try {
+      const userId = user?.id || user?._id || user?.user_id || fallbackUserId
       const [dashboardResponse, lessonPlanResponse] = await Promise.all([
-        apiClient.getDashboard(token),
+        apiClient.getDashboard(userId),
         apiClient.getLessonPlan(token),
       ])
 
@@ -54,7 +53,7 @@ const DashboardPage = () => {
     } finally {
       setLoading(false)
     }
-  }, [token])
+  }, [token, user])
 
   useEffect(() => {
     fetchAllData()

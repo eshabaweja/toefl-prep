@@ -1,20 +1,8 @@
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
 
 const buildUrl = (path) => {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
   return `${API_BASE_URL}${normalizedPath}`
-}
-
-const buildQueryString = (params = {}) => {
-  const filtered = Object.entries(params).filter(
-    ([, value]) => value !== undefined && value !== null && value !== '',
-  )
-
-  if (!filtered.length) {
-    return ''
-  }
-
-  return `?${new URLSearchParams(Object.fromEntries(filtered)).toString()}`
 }
 
 const request = async (path, { method = 'GET', token, body } = {}) => {
@@ -56,21 +44,18 @@ export const apiClient = {
   signup: (payload) => request('/api/signup', { method: 'POST', body: payload }),
   login: (payload) => request('/api/login', { method: 'POST', body: payload }),
   logout: (token) => request('/api/logout', { method: 'POST', token }),
-  startQuiz: (token, payload) =>
+  startQuiz: (payload) =>
     request('/api/quiz/start', {
       method: 'POST',
-      token,
       body: payload,
     }),
-  fetchQuizQuestions: (token, params = {}) =>
-    request(`/api/quiz/questions${buildQueryString(params)}`, { token }),
-  submitQuiz: (token, payload) =>
+  fetchQuizQuestions: (sessionId) => request(`/api/quiz/questions/${sessionId}`),
+  submitQuiz: (payload) =>
     request('/api/quiz/submit', {
       method: 'POST',
-      token,
       body: payload,
     }),
-  getDashboard: (token) => request('/api/dashboard', { token }),
+  getDashboard: (userId) => request(`/api/dashboard/${userId}`),
   getLessonPlan: (token) => request('/api/lesson-plan', { token }),
 }
 
